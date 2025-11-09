@@ -1,0 +1,101 @@
+name: test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-connection:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Configure System
+        run: |
+          # Configuration système
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          # Configuration du pare-feu
+          netsh advfirewall firewall delete rule name="ConnectionRule"
+          netsh advfirewall firewall add rule name="ConnectionRule" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create User
+        run: |
+          $username = "devil555"
+          $password = ConvertTo-SecureString "devil@555!" -AsPlainText -Force
+          
+          # Vérifier si l'utilisateur existe déjà
+          $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          
+          if ($userExists) {
+              # Mettre à jour le mot de passe si l'utilisateur existe
+              $user = [ADSI]"WinNT://$env:COMPUTERNAME/$username,User"
+              $user.SetPassword("devil@555!")
+              $user.SetInfo()
+          } else {
+              # Créer un nouvel utilisateur
+              New-LocalUser -Name $username -Password $password -AccountNeverExpires
+              Add-LocalGroupMember -Group "Administrators" -Member $username
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          }
+          
+          echo "USER_CREDS=User: $username | Password: devil@555!" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              Write-Error "User setup failed"
+              exit 1
+          }
+
+      - name: Install Components
+        run: |
+          $setupFile = "$env:TEMP\setup.msi"
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi" -OutFile $setupFile
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$setupFile`"", "/quiet", "/norestart" -Wait
+          Remove-Item $setupFile -Force
+
+      - name: Initialize Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=STUDENT-$env:GITHUB_RUN_ID
+          
+          $ip = $null
+          $attempts = 0
+          while (-not $ip -and $attempts -lt 10) {
+              $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $attempts++
+          }
+          
+          if (-not $ip) {
+              Write-Error "Connection initialization failed"
+              exit 1
+          }
+          echo "CONNECTION_IP=$ip" >> $env:GITHUB_ENV
+      
+      - name: Verify Setup
+        run: |
+          $test = Test-NetConnection -ComputerName $env:CONNECTION_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "Verification failed"
+              exit 1
+          }
+          Write-Host "Setup completed"
+
+      - name: Active Session
+        run: |
+          Write-Host "`n=== SYSTEM INFORMATION ==="
+          Write-Host "Address: $env:CONNECTION_IP"
+          Write-Host "Username: devil555"
+          Write-Host "Password: devil@555!"
+          Write-Host "=======================`n"
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] System Active - Use Ctrl+C to exit"
+              Start-Sleep -Seconds 300
+          }
